@@ -8,6 +8,7 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";  // NEW
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -20,6 +21,14 @@ export class EDAAppStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       publicReadAccess: false,
+    });
+
+    // NEW - table
+    const imagesTable = new dynamodb.Table(this, "ImagesTable", {
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      partitionKey: { name: "name", type: dynamodb.AttributeType.STRING },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      tableName: "Images",
     });
 
     // Integration infrastructure
@@ -38,14 +47,20 @@ export class EDAAppStack extends cdk.Stack {
 
     // Lambda functions
 
-    const processImageFn = new lambdanode.NodejsFunction(
+    // CHANGED - processImageFn renamed to persistImageDataFn
+    const persistImageDataFn = new lambdanode.NodejsFunction(
       this,
-      "ProcessImage",
+      "PersistImageDataFn",
       {
         runtime: lambda.Runtime.NODEJS_22_X,
-        entry: `${__dirname}/../lambdas/processImage.ts`,
+        entry: `${__dirname}/../lambdas/persistImageData.ts`,
         timeout: cdk.Duration.seconds(15),
         memorySize: 128,
+        environment: {
+          TABLE_NAME: imagesTable.tableName,
+          BUCKET_NAME: imagesBucket.bucketName,
+          REGION: 'eu-west-1'
+        },
       }
     );
 
@@ -59,7 +74,7 @@ export class EDAAppStack extends cdk.Stack {
     // S3 --> SNS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.SnsDestination(newImageTopic)  // Changed
+      new s3n.SnsDestination(newImageTopic)
     );
 
     // SNS --> SQS
@@ -70,7 +85,7 @@ export class EDAAppStack extends cdk.Stack {
     newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
 
     // SQS --> Lambda
-    const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {  // Changed
+    const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
       batchSize: 5,
       maxBatchingWindow: cdk.Duration.seconds(5),
     });
@@ -80,12 +95,13 @@ export class EDAAppStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(5),
     });
 
-    processImageFn.addEventSource(newImageEventSource);
+    persistImageDataFn.addEventSource(newImageEventSource);  // Changed
     mailerFn.addEventSource(newImageMailEventSource);
 
     // Permissions
 
-    imagesBucket.grantRead(processImageFn);
+    imagesBucket.grantRead(persistImageDataFn);  // Changed
+    imagesTable.grantReadWriteData(persistImageDataFn);  // NEW
 
     mailerFn.addToRolePolicy(
       new iam.PolicyStatement({
