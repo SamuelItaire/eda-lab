@@ -8,7 +8,7 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as dynamodb from "aws-cdk-lib/aws-dynamodb";  // NEW
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -23,7 +23,6 @@ export class EDAAppStack extends cdk.Stack {
       publicReadAccess: false,
     });
 
-    // NEW - table
     const imagesTable = new dynamodb.Table(this, "ImagesTable", {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       partitionKey: { name: "name", type: dynamodb.AttributeType.STRING },
@@ -33,8 +32,17 @@ export class EDAAppStack extends cdk.Stack {
 
     // Integration infrastructure
 
+    // NEW
+    const dlq = new sqs.Queue(this, "img-dlq", {
+      receiveMessageWaitTime: cdk.Duration.seconds(6),
+    });
+    // UPDATE
     const imageProcessQueue = new sqs.Queue(this, "img-process-q", {
       receiveMessageWaitTime: cdk.Duration.seconds(6),
+      deadLetterQueue: {
+        queue: dlq,
+        maxReceiveCount: 1,
+      },
     });
 
     const mailerQ = new sqs.Queue(this, "mailer-q", {
@@ -47,7 +55,6 @@ export class EDAAppStack extends cdk.Stack {
 
     // Lambda functions
 
-    // CHANGED - processImageFn renamed to persistImageDataFn
     const persistImageDataFn = new lambdanode.NodejsFunction(
       this,
       "PersistImageDataFn",
@@ -70,6 +77,18 @@ export class EDAAppStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(3),
       entry: `${__dirname}/../lambdas/mailer.ts`,
     });
+
+    // NEW
+    const rejectedFileFn = new lambdanode.NodejsFunction(
+      this,
+      "RejectedFileFn",
+      {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/rejectedFile.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+      }
+    );
 
     // S3 --> SNS
     imagesBucket.addEventNotification(
@@ -95,13 +114,20 @@ export class EDAAppStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(5),
     });
 
-    persistImageDataFn.addEventSource(newImageEventSource);  // Changed
+    // NEW
+    const rejectedFileEventSource = new events.SqsEventSource(dlq, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(10),
+    });
+
+    persistImageDataFn.addEventSource(newImageEventSource);
     mailerFn.addEventSource(newImageMailEventSource);
+    rejectedFileFn.addEventSource(rejectedFileEventSource);  // NEW
 
     // Permissions
 
-    imagesBucket.grantRead(persistImageDataFn);  // Changed
-    imagesTable.grantReadWriteData(persistImageDataFn);  // NEW
+    imagesBucket.grantRead(persistImageDataFn);
+    imagesTable.grantReadWriteData(persistImageDataFn);
 
     mailerFn.addToRolePolicy(
       new iam.PolicyStatement({
